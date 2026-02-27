@@ -1,144 +1,205 @@
-import { useState, useRef, useCallback, useEffect } from 'react';
-import { EVENTS, PHASES } from './data/events';
-import TimelineEvent from './components/TimelineEvent';
-import CharacterFilter from './components/CharacterFilter';
-import InteractiveMap from './components/InteractiveMap';
-import DocumentModal from './components/DocumentModal';
-import PhaseNav from './components/PhaseNav';
-import 'leaflet/dist/leaflet.css';
+import { useState, useEffect, useMemo, useCallback, useRef } from 'react';
+import { BULLETINS, BULLETIN_ORDER, CATEGORIES } from './data/bulletins';
+import { generateSampleData } from './data/sampleData';
+import Header from './components/Header';
+import BulletinFilter from './components/BulletinFilter';
+import CategoryFilter from './components/CategoryFilter';
+import DateNav from './components/DateNav';
+import EntryCard from './components/EntryCard';
+import StatsBar from './components/StatsBar';
+import Footer from './components/Footer';
 import './App.css';
 
 export default function App() {
-  const [activeEvent, setActiveEvent] = useState(null);
-  const [selectedEvent, setSelectedEvent] = useState(null);
-  const [activeCharacters, setActiveCharacters] = useState([]);
-  const [activePhase, setActivePhase] = useState(null);
-  const phaseRefs = useRef({});
-
-  const activeLocations = activeEvent ? activeEvent.locations : [];
-
-  const handleEventClick = useCallback((event) => {
-    setActiveEvent(event);
-    setSelectedEvent(event);
-  }, []);
-
-  const handleCharacterToggle = useCallback((characterId) => {
-    setActiveCharacters((prev) =>
-      prev.includes(characterId)
-        ? prev.filter((id) => id !== characterId)
-        : [...prev, characterId]
-    );
-  }, []);
-
-  const handlePhaseClick = useCallback((phaseKey) => {
-    setActivePhase(phaseKey);
-    const el = phaseRefs.current[phaseKey];
-    if (el) {
-      el.scrollIntoView({ behavior: 'smooth', block: 'start' });
-    }
-  }, []);
-
-  const groupedEvents = Object.keys(PHASES).map((phaseKey) => ({
-    phase: phaseKey,
-    ...PHASES[phaseKey],
-    events: EVENTS.filter((e) => e.phase === phaseKey),
-  }));
+  const [entries, setEntries] = useState([]);
+  const [activeBulletins, setActiveBulletins] = useState(new Set(BULLETIN_ORDER));
+  const [activeCategories, setActiveCategories] = useState(new Set(Object.keys(CATEGORIES)));
+  const [selectedDate, setSelectedDate] = useState(null);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    const handleKeyDown = (e) => {
-      if (e.key === 'Escape') setSelectedEvent(null);
-    };
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
+    async function loadData() {
+      try {
+        const baseUrl = import.meta.env.BASE_URL || '/';
+        const response = await fetch(`${baseUrl}data/entries.json`);
+        if (response.ok) {
+          const data = await response.json();
+          setEntries(data.entries || []);
+        } else {
+          setEntries(generateSampleData());
+        }
+      } catch {
+        setEntries(generateSampleData());
+      }
+      setLoading(false);
+    }
+    loadData();
   }, []);
+
+  const dates = useMemo(() => {
+    const dateSet = new Set(entries.map(e => e.date));
+    return [...dateSet].sort((a, b) => b.localeCompare(a));
+  }, [entries]);
+
+  const initialDateSet = useRef(false);
+  if (dates.length > 0 && !selectedDate && !initialDateSet.current) {
+    initialDateSet.current = true;
+    setSelectedDate(dates[0]);
+  }
+
+  const toggleBulletin = useCallback((id) => {
+    setActiveBulletins(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        if (next.size > 1) next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }, []);
+
+  const toggleCategory = useCallback((id) => {
+    setActiveCategories(prev => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        if (next.size > 1) next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }, []);
+
+  const resetCategories = useCallback(() => {
+    setActiveCategories(new Set(Object.keys(CATEGORIES)));
+  }, []);
+
+  const filteredEntries = useMemo(() => {
+    return entries.filter(entry => {
+      if (!activeBulletins.has(entry.bulletinId)) return false;
+      if (!activeCategories.has(entry.category)) return false;
+      if (selectedDate && entry.date !== selectedDate) return false;
+      if (searchQuery) {
+        const q = searchQuery.toLowerCase();
+        return (
+          entry.title.toLowerCase().includes(q) ||
+          entry.summary.toLowerCase().includes(q) ||
+          entry.organism.toLowerCase().includes(q)
+        );
+      }
+      return true;
+    });
+  }, [entries, activeBulletins, activeCategories, selectedDate, searchQuery]);
+
+  const groupedEntries = useMemo(() => {
+    const groups = {};
+    BULLETIN_ORDER.forEach(id => {
+      if (activeBulletins.has(id)) {
+        groups[id] = filteredEntries.filter(e => e.bulletinId === id);
+      }
+    });
+    return groups;
+  }, [filteredEntries, activeBulletins]);
+
+  const stats = useMemo(() => {
+    const byBulletin = {};
+    BULLETIN_ORDER.forEach(id => {
+      byBulletin[id] = entries.filter(e => e.date === selectedDate && e.bulletinId === id).length;
+    });
+    return {
+      total: filteredEntries.length,
+      byBulletin,
+      date: selectedDate,
+    };
+  }, [entries, filteredEntries, selectedDate]);
+
+  if (loading) {
+    return (
+      <div className="loading-screen">
+        <div className="loading-content">
+          <div className="loading-spinner" />
+          <p>Datuak kargatzen...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="app">
-      <header className="app-header">
-        <div className="header-content">
-          <div className="header-flag">
-            <span className="flag-stripe red" />
-            <span className="flag-stripe yellow" />
-            <span className="flag-stripe red" />
-          </div>
-          <h1 className="app-title">23-F Orduz Ordu</h1>
-          <p className="app-subtitle">
-            1981eko otsailaren 23ko Estatu kolpearen kronologia interaktiboa
-          </p>
-          <p className="app-meta">
-            Espainiako Gobernuak 2026an desklasifikatutako 153 dokumentuetan oinarritua
-          </p>
-        </div>
-      </header>
+      <Header searchQuery={searchQuery} onSearchChange={setSearchQuery} />
 
-      <PhaseNav activePhase={activePhase} onPhaseClick={handlePhaseClick} />
+      <main className="main-content">
+        <div className="content-wrapper">
+          <aside className="sidebar">
+            <DateNav
+              dates={dates}
+              selectedDate={selectedDate}
+              onSelect={setSelectedDate}
+            />
+            <BulletinFilter
+              activeBulletins={activeBulletins}
+              onToggle={toggleBulletin}
+              stats={stats.byBulletin}
+            />
+            <CategoryFilter
+              activeCategories={activeCategories}
+              onToggle={toggleCategory}
+              onReset={resetCategories}
+            />
+          </aside>
 
-      <CharacterFilter
-        activeCharacters={activeCharacters}
-        onToggle={handleCharacterToggle}
-      />
+          <section className="entries-section">
+            <StatsBar stats={stats} />
 
-      <div className="main-layout">
-        <div className="timeline-panel">
-          {groupedEvents.map((group) => (
-            <div
-              key={group.phase}
-              className="phase-group"
-              ref={(el) => (phaseRefs.current[group.phase] = el)}
-            >
-              <div className="phase-header" style={{ '--phase-color': group.color }}>
-                <div className="phase-line" style={{ backgroundColor: group.color }} />
-                <h2 className="phase-label">{group.label}</h2>
+            {Object.entries(groupedEntries).map(([bulletinId, bulletinEntries]) => {
+              if (bulletinEntries.length === 0) return null;
+              const bulletin = BULLETINS[bulletinId];
+              return (
+                <div key={bulletinId} className="bulletin-group">
+                  <div
+                    className="bulletin-group-header"
+                    style={{
+                      '--bulletin-color': bulletin.color,
+                      '--bulletin-bg': bulletin.bg,
+                      '--bulletin-border': bulletin.border,
+                    }}
+                  >
+                    <div className="bulletin-indicator" />
+                    <div className="bulletin-group-info">
+                      <h2 className="bulletin-group-name">{bulletin.name}</h2>
+                      <span className="bulletin-group-full">{bulletin.fullName}</span>
+                    </div>
+                    <a
+                      href={bulletin.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      className="bulletin-group-link"
+                    >
+                      Jatorrizko webgunea
+                    </a>
+                  </div>
+                  <div className="bulletin-entries">
+                    {bulletinEntries.map(entry => (
+                      <EntryCard key={entry.id} entry={entry} bulletin={bulletin} />
+                    ))}
+                  </div>
+                </div>
+              );
+            })}
+
+            {filteredEntries.length === 0 && (
+              <div className="empty-state">
+                <h3>Ez da emaitzarik aurkitu</h3>
+                <p>Aldatu iragazkiak edo bilaketa hitza emaitzak ikusteko.</p>
               </div>
-              {group.events.map((event) => (
-                <TimelineEvent
-                  key={event.id}
-                  event={event}
-                  isActive={activeEvent?.id === event.id}
-                  onClick={handleEventClick}
-                  activeCharacters={activeCharacters}
-                />
-              ))}
-            </div>
-          ))}
+            )}
+          </section>
         </div>
+      </main>
 
-        <div className="map-panel">
-          <InteractiveMap activeLocations={activeLocations} />
-          <div className="map-legend">
-            <h4>Kokalekuak</h4>
-            <div className="legend-items">
-              <span className="legend-item">
-                <span className="legend-dot" style={{ backgroundColor: '#e74c3c' }} /> Gune nagusiak
-              </span>
-              <span className="legend-item">
-                <span className="legend-dot" style={{ backgroundColor: '#3498db' }} /> Bigarren mailakoak
-              </span>
-              <span className="legend-item">
-                <span className="legend-dot" style={{ backgroundColor: '#2c3e50' }} /> Kuartel militarrak
-              </span>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <footer className="app-footer">
-        <p>
-          Iturria:{' '}
-          <a
-            href="https://www.lamoncloa.gob.es/consejodeministros/paginas/desclasificacion-documentos-23F.aspx"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            La Moncloa — Dokumentu desklasifikatuak 23-F
-          </a>
-        </p>
-        <p className="footer-note">
-          Hezkuntza-helbururako tresna interaktiboa. 2026ko otsailean desklasifikatutako 153 dokumentuetan oinarritua.
-        </p>
-      </footer>
-
-      <DocumentModal event={selectedEvent} onClose={() => setSelectedEvent(null)} />
+      <Footer />
     </div>
   );
 }

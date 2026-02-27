@@ -1,0 +1,41 @@
+name: Aldizkari ofizialak eguneratu
+
+on:
+  schedule:
+    # Egunero goizeko 09:00etan (CET = UTC+1, CEST = UTC+2)
+    # 07:00 UTC = 08:00 CET / 09:00 CEST
+    - cron: '0 7 * * 1-5'
+  workflow_dispatch:
+    # Eskuz ere exekutatu daiteke
+
+permissions:
+  contents: write
+
+jobs:
+  fetch-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Kodea eskuratu
+        uses: actions/checkout@v4
+
+      - name: Node.js konfiguratu
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Mendekotasunak instalatu
+        run: npm ci
+
+      - name: Aldizkari ofizialak eskuratu
+        run: node scripts/fetch-bulletins.js
+
+      - name: Aplikazioa eraiki
+        run: npm run build
+
+      - name: Aldaketak gorde
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add public/data/entries.json docs/
+          git diff --staged --quiet || git commit -m "Eguneratu: $(date +%Y-%m-%d) aldizkari ofizialetako datuak"
+          git push
