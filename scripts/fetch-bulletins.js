@@ -24,6 +24,15 @@ if (!existsSync(DATA_DIR)) {
 const today = new Date().toISOString().split('T')[0];
 
 /**
+ * Default headers to avoid 403 blocks from government websites
+ */
+const DEFAULT_HEADERS = {
+  'User-Agent': 'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+  'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+  'Accept-Language': 'eu,es;q=0.9,en;q=0.8',
+};
+
+/**
  * Helper: fetch with timeout and retry
  */
 async function fetchWithRetry(url, options = {}, retries = 3) {
@@ -31,8 +40,15 @@ async function fetchWithRetry(url, options = {}, retries = 3) {
     try {
       const controller = new AbortController();
       const timeout = setTimeout(() => controller.abort(), 30000);
-      const response = await fetch(url, { ...options, signal: controller.signal });
+      const mergedHeaders = { ...DEFAULT_HEADERS, ...options.headers };
+      const response = await fetch(url, { ...options, headers: mergedHeaders, signal: controller.signal });
       clearTimeout(timeout);
+      if (response.status === 403) {
+        console.warn(`  [${url}] 403 Forbidden (${i + 1}/${retries} saiakera)`);
+        if (i === retries - 1) return response;
+        await new Promise(r => setTimeout(r, 3000 * (i + 1)));
+        continue;
+      }
       return response;
     } catch (err) {
       if (i === retries - 1) throw err;
@@ -55,23 +71,35 @@ async function fetchEHAA() {
     });
 
     if (response.ok) {
-      const data = await response.json();
-      const items = data.items || data.summaries || data || [];
-      const list = Array.isArray(items) ? items : [];
-
-      for (const item of list) {
-        entries.push({
-          id: `ehaa-${item.id || entries.length}`,
-          bulletinId: 'ehaa',
-          date: today,
-          bulletinNumber: item.bulletinNumber || item.number || '',
-          title: item.title || item.titulo || '',
-          summary: item.summary || item.resumen || item.description || '',
-          category: mapCategory(item.section || item.category || ''),
-          organism: item.organism || item.organismo || item.department || 'Eusko Jaurlaritza',
-          url: item.url || item.link || 'https://www.euskadi.eus/web01-bopv/eu/bopv2/datos/Azkena.shtml',
-        });
+      const text = await response.text();
+      let data;
+      try {
+        data = JSON.parse(text);
+      } catch {
+        console.warn('  EHAA API: erantzuna ez da JSON formatua');
+        data = null;
       }
+
+      if (data) {
+        const items = data.items || data.summaries || data.content || data || [];
+        const list = Array.isArray(items) ? items : [];
+
+        for (const item of list) {
+          entries.push({
+            id: `ehaa-${item.id || entries.length}`,
+            bulletinId: 'ehaa',
+            date: today,
+            bulletinNumber: item.bulletinNumber || item.number || '',
+            title: item.title || item.titulo || '',
+            summary: item.summary || item.resumen || item.description || '',
+            category: mapCategory(item.section || item.category || ''),
+            organism: item.organism || item.organismo || item.department || 'Eusko Jaurlaritza',
+            url: item.url || item.link || 'https://www.euskadi.eus/web01-bopv/eu/bopv2/datos/Azkena.shtml',
+          });
+        }
+      }
+    } else {
+      console.warn(`  EHAA API: HTTP ${response.status}`);
     }
   } catch (err) {
     console.error('EHAA fetch error:', err.message);
@@ -101,23 +129,39 @@ async function fetchEHAA() {
  */
 function parseEHAAHtml(html) {
   const entries = [];
-  // Simple regex-based parsing for BOPV page structure
-  const titleRegex = /<a[^>]*class="[^"]*titulo[^"]*"[^>]*href="([^"]*)"[^>]*>([^<]+)<\/a>/gi;
-  let match;
-  let idx = 0;
+  // Try multiple regex patterns to match different BOPV page structures
+  const patterns = [
+    /<a[^>]*class="[^"]*titulo[^"]*"[^>]*href="([^"]*)"[^>]*>([^<]+)<\/a>/gi,
+    /<a[^>]*href="([^"]*\/bopv2\/[^"]*)"[^>]*>\s*([^<]{15,})\s*<\/a>/gi,
+    /<a[^>]*href="([^"]*)"[^>]*class="[^"]*entry[^"]*"[^>]*>([^<]+)<\/a>/gi,
+    /<h[2-4][^>]*>\s*<a[^>]*href="([^"]*)"[^>]*>([^<]{15,})<\/a>/gi,
+  ];
 
-  while ((match = titleRegex.exec(html)) !== null) {
-    entries.push({
-      id: `ehaa-html-${idx++}`,
-      bulletinId: 'ehaa',
-      date: today,
-      bulletinNumber: '',
-      title: match[2].trim(),
-      summary: '',
-      category: 'bestelakoak',
-      organism: 'Eusko Jaurlaritza',
-      url: match[1].startsWith('http') ? match[1] : `https://www.euskadi.eus${match[1]}`,
-    });
+  let idx = 0;
+  const seen = new Set();
+
+  for (const pattern of patterns) {
+    let match;
+    while ((match = pattern.exec(html)) !== null) {
+      const title = match[2].trim();
+      const url = match[1];
+      const key = `${title}-${url}`;
+      if (title.length > 15 && !seen.has(key) && !title.includes('Cookie')) {
+        seen.add(key);
+        entries.push({
+          id: `ehaa-html-${idx++}`,
+          bulletinId: 'ehaa',
+          date: today,
+          bulletinNumber: '',
+          title: title,
+          summary: '',
+          category: 'bestelakoak',
+          organism: 'Eusko Jaurlaritza',
+          url: url.startsWith('http') ? url : `https://www.euskadi.eus${url}`,
+        });
+      }
+    }
+    if (entries.length > 0) break;
   }
 
   return entries;
@@ -134,6 +178,8 @@ async function fetchNAO() {
       const html = await response.text();
       const parsed = parseNAOHtml(html);
       entries.push(...parsed);
+    } else {
+      console.warn(`  NAO: HTTP ${response.status}`);
     }
   } catch (err) {
     console.error('NAO fetch error:', err.message);
@@ -179,6 +225,8 @@ async function fetchBAO() {
       const html = await response.text();
       const parsed = parseBAOHtml(html);
       entries.push(...parsed);
+    } else {
+      console.warn(`  BAO: HTTP ${response.status}`);
     }
   } catch (err) {
     console.error('BAO fetch error:', err.message);
@@ -225,6 +273,8 @@ async function fetchBOTHA() {
       const html = await response.text();
       const parsed = parseBOTHAHtml(html);
       entries.push(...parsed);
+    } else {
+      console.warn(`  BOTHA: HTTP ${response.status}`);
     }
   } catch (err) {
     console.error('BOTHA fetch error:', err.message);
@@ -269,6 +319,8 @@ async function fetchGAO() {
       const html = await response.text();
       const parsed = parseGAOHtml(html);
       entries.push(...parsed);
+    } else {
+      console.warn(`  GAO: HTTP ${response.status}`);
     }
   } catch (err) {
     console.error('GAO fetch error:', err.message);
@@ -408,7 +460,15 @@ async function main() {
 
   console.log(`\n  Guztira: ${allEntries.length} sarrera`);
   console.log(`  Gordeta: ${OUTPUT_FILE}`);
-  console.log(`  Eguneratze data: ${output.lastUpdated}\n`);
+  console.log(`  Eguneratze data: ${output.lastUpdated}`);
+
+  if (newEntries.length === 0) {
+    console.warn('\n  ⚠ OHARRA: Ez da sarrerarik eskuratu gaur.');
+    console.warn('  Webguneek eskabide automatikoak blokeatzen dituzte (403 Forbidden).');
+    console.warn('  Aplikazioak lagin-datuak erabiliko ditu ordez.\n');
+  } else {
+    console.log('');
+  }
 }
 
 main().catch(err => {

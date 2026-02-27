@@ -25,7 +25,8 @@ export default function App() {
         const response = await fetch(`${baseUrl}data/entries.json`);
         if (response.ok) {
           const data = await response.json();
-          setEntries(data.entries || []);
+          const fetched = data.entries || [];
+          setEntries(fetched.length > 0 ? fetched : generateSampleData());
         } else {
           setEntries(generateSampleData());
         }
